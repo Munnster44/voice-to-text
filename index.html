@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Voice Notes V2T — v2.4.1</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0b1220">
+
+<style>
+body{margin:0;font-family:system-ui;background:#0b1220;color:#e8eefc}
+header{
+  padding:14px;font-weight:700;border-bottom:1px solid #223;
+  display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;
+}
+#recStatus{color:#ff5c5c;font-weight:800;display:none;animation:pulse 1.2s infinite}
+@keyframes pulse{0%{opacity:1}50%{opacity:.3}100%{opacity:1}}
+main{padding:14px;max-width:920px;margin:auto}
+.card{background:#111b2e;border-radius:14px;padding:14px;margin-bottom:14px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+button,input,select{border-radius:10px;border:none;padding:10px;font-size:14px}
+button{background:#2a355a;color:#fff;font-weight:650;cursor:pointer}
+button.active{background:#4ea1ff;color:#041428}
+button.recording{background:#39d98a;color:#042}
+button.danger{background:#ff5c5c;color:#300}
+input,select{background:#0d1730;color:#fff}
+textarea{
+  width:100%;min-height:340px;border-radius:12px;background:#0d1730;color:#fff;
+  padding:12px;border:none;line-height:1.4
+}
+small{color:#9fb1d6}
+.stats{display:flex;gap:14px;flex-wrap:wrap}
+.chip{display:inline-flex;gap:8px;align-items:center;background:#0d1730;border-radius:999px;padding:8px 10px}
+.muted{color:#9fb1d6;font-size:12px}
+.statusline{font-size:12px;color:#9fb1d6;min-height:16px}
+label.toggle{cursor:pointer;user-select:none}
+label.toggle input{transform:scale(1.2);margin-right:8px}
+footer{
+  text-align:center;
+  padding:12px;
+  font-size:12px;
+  color:#9fb1d6;
+  border-top:1px solid #223;
+  margin-top:20px;
+}
+</style>
+</head>
+
+<body>
+<header>
+  <div>🎤 Voice Notes — V2T <span class="muted">v2.4.1</span></div>
+  <span id="recStatus">● RECORDING</span>
+</header>
+
+<main>
+
+<div class="card">
+  <small>Speakers (tap to select)</small>
+  <div class="row" id="speakerButtons" style="margin-top:8px"></div>
+  <div class="row" style="margin-top:10px">
+    <input id="newName" placeholder="Add speaker name">
+    <button onclick="addSpeaker()">Add</button>
+    <button class="danger" onclick="resetSaved()">Reset Saved Data</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row">
+    <button id="startBtn" onclick="start()">Start</button>
+    <button class="danger" onclick="stop()">Stop</button>
+    <button onclick="insertLabel()">Insert Speaker</button>
+    <button onclick="saveText()">Save .txt</button>
+    <button onclick="clearText()">Clear</button>
+  </div>
+
+  <div class="row" style="margin-top:10px">
+    <select id="lang">
+      <option value="en-CA">English (Canada)</option>
+      <option value="fr-CA">Français (Canada)</option>
+      <option value="en-US">English (US)</option>
+      <option value="en-GB">English (UK)</option>
+      <option value="fr-FR">Français (France)</option>
+    </select>
+
+    <span class="chip">
+      <label class="toggle">
+        <input id="autoRestartToggle" type="checkbox" checked>
+        Auto-Restart
+      </label>
+    </span>
+
+    <span class="chip">
+      <span class="muted">Status:</span>
+      <span id="statusMsg" class="statusline">Idle</span>
+    </span>
+  </div>
+</div>
+
+<div class="card">
+  <textarea id="out" placeholder="Transcript…"></textarea>
+</div>
+
+<div class="card stats">
+  <small>🕒 Time: <span id="timer">00:00</span></small>
+  <small>📝 Words: <span id="words">0</span></small>
+</div>
+
+</main>
+
+<footer>
+  © 2026 Glen Carruthers — Voice Notes V2T v2.4.1
+</footer>
+
+<script>
+/* ====== PWA ====== */
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("service-worker.js");
+}
+
+/* ====== SPEECH ====== */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const STORAGE_KEY = "v2t_voice_notes_v2_4_1";
+
+let rec=null,running=false,userStopped=false,isStarting=false,lastEndWasAuto=false;
+let micStream=null,restartDelayMs=600,restartMaxMs=4000;
+
+const out=document.getElementById("out");
+const recStatus=document.getElementById("recStatus");
+const startBtn=document.getElementById("startBtn");
+const langSel=document.getElementById("lang");
+const wordsEl=document.getElementById("words");
+const timerEl=document.getElementById("timer");
+const statusMsg=document.getElementById("statusMsg");
+const autoRestartToggle=document.getElementById("autoRestartToggle");
+
+let speakers=["Speaker 1","Speaker 2"],current=speakers[0];
+const btns=document.getElementById("speakerButtons");
+
+let seconds=0,timerInt=null;
+
+/* ====== UTIL ====== */
+function setStatus(t){statusMsg.textContent=t}
+function timestamp(){return new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}
+function updateStats(){
+  const w=out.value.trim().match(/\S+/g);
+  wordsEl.textContent=w?w.length:0
+}
+function beep(f,d){
+  try{const c=new (window.AudioContext||window.webkitAudioContext)();
+    const o=c.createOscillator();o.frequency.value=f;o.connect(c.destination);
+    o.start();setTimeout(()=>{o.stop();c.close()},d)}catch(e){}
+}
+
+/* ====== TIMER ====== */
+function startTimer(){
+  stopTimer();seconds=0;timerEl.textContent="00:00";
+  timerInt=setInterval(()=>{seconds++;
+    timerEl.textContent=
+      String(Math.floor(seconds/60)).padStart(2,"0")+":"+
+      String(seconds%60).padStart(2,"0")
+  },1000)
+}
+function stopTimer(){if(timerInt)clearInterval(timerInt)}
+
+/* ====== AUTOSAVE ====== */
+function saveState(){
+  localStorage.setItem(STORAGE_KEY,JSON.stringify({
+    speakers,current,transcript:out.value,lang:langSel.value,autoRestart:autoRestartToggle.checked
+  }))
+}
+function loadState(){
+  const r=localStorage.getItem(STORAGE_KEY);if(!r)return;
+  const s=JSON.parse(r);
+  speakers=s.speakers||speakers;
+  current=s.current||current;
+  out.value=s.transcript||"";
+  langSel.value=s.lang||"en-CA";
+  autoRestartToggle.checked=s.autoRestart!==false;
+}
+
+/* ====== SPEAKERS ====== */
+function renderSpeakers(){
+  btns.innerHTML="";
+  speakers.forEach(s=>{
+    const b=document.createElement("button");
+    b.textContent=s;if(s===current)b.classList.add("active");
+    b.onclick=()=>{current=s;renderSpeakers();saveState()};
+    btns.appendChild(b)
+  })
+}
+function addSpeaker(){
+  const v=document.getElementById("newName").value.trim();
+  if(!v)return;
+  speakers.push(v);current=v;
+  document.getElementById("newName").value="";
+  renderSpeakers();saveState()
+}
+function insertLabel(){
+  out.value+=`\n[${timestamp()}] [${current}] `;
+  updateStats();saveState();out.focus()
+}
+
+/* ====== MIC ====== */
+async function ensureMic(){
+  if(micStream)return true;
+  try{micStream=await navigator.mediaDevices.getUserMedia({audio:true});return true}
+  catch{setStatus("Microphone blocked");return false}
+}
+
+/* ====== RECOGNITION ====== */
+function buildRec(){
+  const r=new SR();r.lang=langSel.value;r.continuous=true;
+  r.onstart=()=>{running=true;recStatus.style.display="inline";
+    startBtn.classList.add("recording");startTimer();beep(880,120);
+    setStatus(lastEndWasAuto?"Restarted":"Listening…")
+  };
+  r.onresult=e=>{
+    let t="";for(let i=e.resultIndex;i<e.results.length;i++)
+      if(e.results[i].isFinal)t+=e.results[i][0].transcript;
+    if(t){out.value+=`[${timestamp()}] [${current}] ${t.trim()}.\n`;
+      updateStats();saveState()}
+  };
+  r.onend=()=>{running=false;recStatus.style.display="none";
+    startBtn.classList.remove("recording");stopTimer();
+    if(!userStopped&&autoRestartToggle.checked){
+      lastEndWasAuto=true;setTimeout(()=>{try{r.start()}catch{}},restartDelayMs)
+    } else setStatus("Stopped")
+  };
+  return r
+}
+
+async function start(){
+  userStopped=false;lastEndWasAuto=false;
+  if(!await ensureMic())return;
+  if(!rec)rec=buildRec();
+  try{rec.start()}catch{}
+}
+function stop(){
+  userStopped=true;if(rec)try{rec.stop()}catch{}
+  setStatus("Stopped");beep(440,120)
+}
+function saveText(){
+  const b=new Blob([`© 2026 Glen Carruthers\n\n${out.value}`],{type:"text/plain"});
+  const a=document.createElement("a");a.href=URL.createObjectURL(b);
+  a.download="voice-notes.txt";a.click()
+}
+function clearText(){out.value="";updateStats();saveState()}
+function resetSaved(){
+  if(!confirm("Reset saved data?"))return;
+  localStorage.removeItem(STORAGE_KEY);location.reload()
+}
+
+/* ====== INIT ====== */
+loadState();renderSpeakers();updateStats();setStatus("Idle");
+</script>
+
+</body>
+</html>
